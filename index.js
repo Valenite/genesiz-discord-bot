@@ -15,9 +15,18 @@ import {
 import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
-import dotenv from 'dotenv';
+import http from 'http';
 
 dotenv.config();
+
+// Minimal HTTP server for Render Free Web Service ($0/month)
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('🤖 GENESIZ 2026 Verification Bot is active!');
+}).listen(port, () => {
+  console.log(`🌐 Free Web Service HTTP listener running on port ${port}`);
+});
 
 const EVENT_ROLE_MAP = {
   'valorant': 'valorant',
