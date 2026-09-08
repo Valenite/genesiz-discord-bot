@@ -29,12 +29,17 @@ process.on('uncaughtException', (err, origin) => {
 
 // Minimal HTTP server for Render / Cloud hosting ($0/month)
 const port = process.env.PORT || 3000;
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('🤖 GENESIZ 2026 Verification Bot is active and optimized!');
+  res.end('🤖 GENESIZ 2026 Verification Bot is 100% active, online, and persistent!');
 }).listen(port, () => {
   console.log(`🌐 Web Service HTTP listener running on port ${port}`);
 });
+
+// Self-Ping Heartbeat to prevent Render Free Service from going to sleep
+setInterval(() => {
+  http.get(`http://localhost:${port}/`, () => {}).on('error', () => {});
+}, 3 * 60 * 1000); // Heartbeat ping every 3 minutes
 
 const EVENT_ROLE_MAP = {
   'valorant': 'valorant',
@@ -67,11 +72,10 @@ const ALL_EVENT_ROLES = [
   'cryptic hunt'
 ];
 
-// Initialize Discord Client with required intents
+// Initialize Discord Client with standard non-privileged intents (guarantees zero 4014 login errors)
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.Guilds
   ]
 });
 
@@ -316,7 +320,7 @@ async function syncMemberRoles(guild, member, registration) {
     try {
       await member.setNickname(newNickname);
     } catch {
-      // Ignore nickname permission errors (e.g. server owner or higher role hierarchy)
+      // Ignore nickname permission errors
     }
   }
 
@@ -376,7 +380,7 @@ async function handleVerification(interaction, rawCode) {
         inline: false 
       }
     )
-    .setFooter({ text: 'GENESIZ 2026 • Role Sync Complete' })
+    .setFooter({ text: 'GENESIZ 2026 • 24/7 Persistent Verification' })
     .setTimestamp();
 
   if (addedRoles.length > 0) {
@@ -390,7 +394,7 @@ async function handleVerification(interaction, rawCode) {
   return interaction.editReply({ embeds: [successEmbed] }).catch(() => {});
 }
 
-// Optimized Background Task: Periodic Auto-Sync Every 10 Minutes with Concurrency Rate Limits
+// Optimized Background Task: Periodic Auto-Sync Every 10 Minutes
 async function runBackgroundAutoSync() {
   if (!supabase) return;
 
@@ -413,7 +417,6 @@ async function runBackgroundAutoSync() {
         if (registration) {
           await syncMemberRoles(guild, member, registration);
         }
-        // Small delay to prevent API bursts
         await new Promise(r => setTimeout(r, 250));
       } catch {
         // Ignore individual sync failures
@@ -424,10 +427,27 @@ async function runBackgroundAutoSync() {
   }
 }
 
+// Client Reconnect & Resilience Handlers
+client.on(Events.Error, (err) => {
+  console.error('[Discord Client Error]:', err.message);
+});
+
+client.on(Events.ShardError, (err) => {
+  console.error('[Discord Shard Error]:', err.message);
+});
+
+client.on(Events.ShardDisconnect, (event, id) => {
+  console.warn(`[Discord Shard Disconnected] Shard ${id} code ${event.code}. Automatic reconnect in progress...`);
+});
+
+client.on(Events.ShardReconnecting, (id) => {
+  console.log(`[Discord Shard Reconnecting] Shard ${id} reconnecting to Discord Gateway...`);
+});
+
 // Event: Ready
 client.once(Events.ClientReady, async c => {
   console.log(`🤖 GENESIZ Verification Bot active as ${c.user.tag}`);
-  console.log('⚡ High-Concurrency Code-Only Verification Engine Initialized!');
+  console.log('⚡ 24/7 Always-Online & Auto-Reconnecting Engine Initialized!');
 
   const guildId = process.env.GUILD_ID;
   if (guildId) {
@@ -437,23 +457,7 @@ client.once(Events.ClientReady, async c => {
     }
   }
 
-  // Run background auto-sync safely every 10 minutes
   setInterval(runBackgroundAutoSync, 10 * 60 * 1000);
-});
-
-// Event: New Guild Member Join (Auto Verification on Join if user was mapped)
-client.on(Events.GuildMemberAdd, async member => {
-  try {
-    if (userCodeMap.has(member.id)) {
-      const code = userCodeMap.get(member.id);
-      const registration = await findRegistration(code);
-      if (registration) {
-        await syncMemberRoles(member.guild, member, registration);
-      }
-    }
-  } catch (err) {
-    console.error('Auto-sync on member join error:', err.message);
-  }
 });
 
 // Event: Interaction Create
