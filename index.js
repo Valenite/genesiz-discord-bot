@@ -31,7 +31,7 @@ process.on('uncaughtException', (err, origin) => {
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('🤖 GENESIZ 2026 Verification Bot is 100% active, resilient, and optimized!');
+  res.end('🤖 GENESIZ 2026 Verification Bot is active and optimized!');
 }).listen(port, () => {
   console.log(`🌐 Web Service HTTP listener running on port ${port}`);
 });
@@ -95,11 +95,7 @@ function getRegistrationFromLocalJSON(code) {
     if (fs.existsSync(jsonPath)) {
       const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
       const clean = code.trim().toLowerCase();
-      return data.find(r => 
-        r.id.toLowerCase() === clean || 
-        (r.leaderEmail && r.leaderEmail.toLowerCase() === clean) ||
-        (r.teamName && r.teamName.toLowerCase() === clean)
-      );
+      return data.find(r => r.id.toLowerCase() === clean);
     }
   } catch (err) {
     console.error('Local JSON check error:', err.message);
@@ -107,15 +103,13 @@ function getRegistrationFromLocalJSON(code) {
   return null;
 }
 
-// Ultra-Flexible & High-Performance Registration Finder (Matches Operative Code OR Leader Email OR Team Name)
-async function findRegistration(rawInput) {
-  if (!rawInput) return null;
-  const cleanInput = rawInput.trim();
-  const upperCode = cleanInput.toUpperCase();
-  const lowerInput = cleanInput.toLowerCase();
+// High-Performance Registration Code Finder (Verifies strictly by Operative Code ID)
+async function findRegistration(rawCode) {
+  if (!rawCode) return null;
+  const upperCode = rawCode.trim().toUpperCase();
 
   // Check TTL cache first
-  const cached = regCache.get(lowerInput) || regCache.get(upperCode);
+  const cached = regCache.get(upperCode);
   if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
     return cached.data;
   }
@@ -124,26 +118,24 @@ async function findRegistration(rawInput) {
 
   if (supabase) {
     try {
-      // Query by ID (Operative Code) OR Leader Email OR Team Name
       const { data, error } = await supabase
         .from('registrations')
         .select('*')
-        .or(`id.ilike.${upperCode},leader_email.ilike.${lowerInput},team_name.ilike.${lowerInput}`)
-        .limit(1);
+        .ilike('id', upperCode)
+        .maybeSingle();
 
       if (error) {
         console.error('Supabase lookup error:', error.message);
       }
 
-      if (data && data.length > 0) {
-        const row = data[0];
+      if (data) {
         result = {
-          id: row.id,
-          teamName: row.team_name || row.teamName,
-          selectedEvents: row.selected_events || row.selectedEvents || [],
-          selectedEventNames: row.selected_event_names || row.selectedEventNames || [],
-          leaderName: row.leader_name || row.leaderName,
-          leaderEmail: row.leader_email || row.leaderEmail
+          id: data.id,
+          teamName: data.team_name || data.teamName,
+          selectedEvents: data.selected_events || data.selectedEvents || [],
+          selectedEventNames: data.selected_event_names || data.selectedEventNames || [],
+          leaderName: data.leader_name || data.leaderName,
+          leaderEmail: data.leader_email || data.leaderEmail
         };
       }
     } catch (err) {
@@ -152,7 +144,7 @@ async function findRegistration(rawInput) {
   }
 
   if (!result) {
-    const localRec = getRegistrationFromLocalJSON(upperCode) || getRegistrationFromLocalJSON(lowerInput);
+    const localRec = getRegistrationFromLocalJSON(upperCode);
     if (localRec) {
       result = {
         id: localRec.id,
@@ -166,8 +158,7 @@ async function findRegistration(rawInput) {
   }
 
   if (result) {
-    regCache.set(lowerInput, { data: result, timestamp: Date.now() });
-    regCache.set(result.id.toUpperCase(), { data: result, timestamp: Date.now() });
+    regCache.set(upperCode, { data: result, timestamp: Date.now() });
   }
 
   return result;
@@ -304,7 +295,7 @@ async function syncMemberRoles(guild, member, registration) {
 
 // High-Concurrency Interactive Verification Handler
 async function handleVerification(interaction, rawCode) {
-  const codeClean = rawCode.trim();
+  const codeClean = rawCode.trim().toUpperCase();
 
   // Instant deferral within 100ms to guarantee Discord interaction never times out
   if (!interaction.deferred && !interaction.replied) {
@@ -318,12 +309,12 @@ async function handleVerification(interaction, rawCode) {
       .setColor(0xFF4444)
       .setTitle('❌ Verification Failed')
       .setDescription(
-        `No registration found matching \`${codeClean}\`.\n\n` +
-        `💡 **TIPS TO VERIFY INSTANTLY:**\n` +
-        `• Enter your unique **Operative Code** (e.g. \`GSZ-2026-A4F9\`).\n` +
-        `• Or enter your **Team Captain's Email** registered on the website.\n\n` +
-        `⚠️ **NOT REGISTERED YET?**\n` +
-        `Register free at **[genesizevent.xyz](https://genesizevent.xyz)** to receive your code!`
+        `No registration found matching operative code \`${codeClean}\`.\n\n` +
+        `⚠️ **DONT HAVE AN OPERATIVE CODE YET?**\n` +
+        `You must first register on the official **GENESIZ Website** to receive your code!\n\n` +
+        `1️⃣ Register your squad or solo entry on the website.\n` +
+        `2️⃣ Copy the Operative Code given at the end (e.g. \`GSZ-2026-A4F9\`).\n` +
+        `3️⃣ Click **Verify Operative Code** button again and paste your code!`
       )
       .setFooter({ text: 'GENESIZ 2026 Verification System' });
 
@@ -406,7 +397,7 @@ async function runBackgroundAutoSync() {
 // Event: Ready
 client.once(Events.ClientReady, async c => {
   console.log(`🤖 GENESIZ Verification Bot active as ${c.user.tag}`);
-  console.log('⚡ High-Concurrency & Multi-Field Verification Engine Initialized!');
+  console.log('⚡ High-Concurrency Code-Only Verification Engine Initialized!');
 
   const guildId = process.env.GUILD_ID;
   if (guildId) {
@@ -420,13 +411,9 @@ client.once(Events.ClientReady, async c => {
   setInterval(runBackgroundAutoSync, 10 * 60 * 1000);
 });
 
-// Event: New Guild Member Join (Auto Verification on Join if user tag/username matches)
+// Event: New Guild Member Join (Auto Verification on Join if user was mapped)
 client.on(Events.GuildMemberAdd, async member => {
   try {
-    const username = member.user.username;
-    const tag = member.user.tag;
-
-    // Check if user was previously mapped
     if (userCodeMap.has(member.id)) {
       const code = userCodeMap.get(member.id);
       const registration = await findRegistration(code);
@@ -463,8 +450,8 @@ client.on(Events.InteractionCreate, async interaction => {
             'You **MUST** first register on the official website to unlock this Discord server!\n\n' +
             '📋 **HOW TO UNLOCK OR UPDATE YOUR ROLES:**\n' +
             '1️⃣ Go to the official **GENESIZ Website** (`genesizevent.xyz`).\n' +
-            '2️⃣ Copy your unique **Operative Code** (e.g., `GSZ-2026-A4F9`) or use your **Team Captain Email**.\n' +
-            '3️⃣ Click the **"🔐 Verify / Sync Operative Roles"** button below and enter your code/email.\n\n' +
+            '2️⃣ Copy your unique **Operative Code** (e.g., `GSZ-2026-A4F9`).\n' +
+            '3️⃣ Click the **"🔐 Verify / Sync Operative Roles"** button below and enter your code.\n\n' +
             '🔄 *If you change or add/remove categories on the website later, click this button again to automatically update your Discord roles!*'
           )
           .setFooter({ text: 'GENESIZ Security Grid • Register or update on genesizevent.xyz' });
@@ -481,12 +468,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const codeInput = new TextInputBuilder()
           .setCustomId('operative_code_input')
-          .setLabel('ENTER OPERATIVE CODE OR CAPTAIN EMAIL')
-          .setPlaceholder('e.g. GSZ-2026-A4F9 or captain@institution.edu')
+          .setLabel('ENTER YOUR OPERATIVE CODE')
+          .setPlaceholder('e.g. GSZ-2026-A4F9')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setMinLength(4)
-          .setMaxLength(60);
+          .setMinLength(6)
+          .setMaxLength(20);
 
         const actionRow = new ActionRowBuilder().addComponents(codeInput);
         modal.addComponents(actionRow);
