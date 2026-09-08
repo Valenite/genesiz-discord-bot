@@ -8,8 +8,6 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  ChannelType,
-  PermissionFlagsBits,
   Events
 } from 'discord.js';
 import { createClient } from '@supabase/supabase-js';
@@ -20,13 +18,13 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Minimal HTTP server for Render Free Web Service ($0/month)
+// Minimal HTTP server for Render / Cloud hosting ($0/month)
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('🤖 GENESIZ 2026 Verification Bot is active!');
+  res.end('🤖 GENESIZ 2026 Verification Bot is active and optimized for high concurrency!');
 }).listen(port, () => {
-  console.log(`🌐 Free Web Service HTTP listener running on port ${port}`);
+  console.log(`🌐 Web Service HTTP listener running on port ${port}`);
 });
 
 const EVENT_ROLE_MAP = {
@@ -60,7 +58,7 @@ const ALL_EVENT_ROLES = [
   'cryptic hunt'
 ];
 
-// Initialize Discord Client
+// Initialize Discord Client with minimal required intents
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds
@@ -72,6 +70,13 @@ let supabase = null;
 if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
   supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 }
+
+// In-Memory Registration TTL Cache (60 second TTL to prevent Supabase database spam)
+const regCache = new Map();
+const CACHE_TTL_MS = 60 * 1000;
+
+// In-Memory Role Cache (name.toLowerCase() -> Role)
+const roleCache = new Map();
 
 // Fallback JSON reader
 function getRegistrationFromLocalJSON(code) {
@@ -87,48 +92,106 @@ function getRegistrationFromLocalJSON(code) {
   return null;
 }
 
-// Helper: Query Registration Code
+// Cached & High-Performance Supabase Registration Finder
 async function findRegistration(codeClean) {
+  const upperCode = codeClean.trim().toUpperCase();
+
+  // Check TTL cache first
+  const cached = regCache.get(upperCode);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+    return cached.data;
+  }
+
+  let result = null;
+
   if (supabase) {
-    const { data, error } = await supabase
-      .from('registrations')
-      .select('*')
-      .ilike('id', codeClean)
-      .maybeSingle();
+    try {
+      const { data, error } = await supabase
+        .from('registrations')
+        .select('*')
+        .ilike('id', upperCode)
+        .maybeSingle();
 
-    if (error) {
-      console.error('Supabase lookup error:', error);
+      if (error) {
+        console.error('Supabase lookup error:', error.message);
+      }
+
+      if (data) {
+        result = {
+          id: data.id,
+          teamName: data.team_name || data.teamName,
+          selectedEvents: data.selected_events || data.selectedEvents || [],
+          selectedEventNames: data.selected_event_names || data.selectedEventNames || [],
+          leaderName: data.leader_name || data.leaderName,
+          leaderEmail: data.leader_email || data.leaderEmail
+        };
+      }
+    } catch (err) {
+      console.error('Supabase query exception:', err.message);
     }
+  }
 
-    if (data) {
-      console.log(`[Verification Match] Code '${codeClean}' matched Team '${data.team_name || data.teamName}'`);
-      return {
-        id: data.id,
-        teamName: data.team_name || data.teamName,
-        selectedEvents: data.selected_events || data.selectedEvents || [],
-        selectedEventNames: data.selected_event_names || data.selectedEventNames || [],
-        leaderName: data.leader_name || data.leaderName,
-        leaderEmail: data.leader_email || data.leaderEmail
+  if (!result) {
+    const localRec = getRegistrationFromLocalJSON(upperCode);
+    if (localRec) {
+      result = {
+        id: localRec.id,
+        teamName: localRec.teamName,
+        selectedEvents: localRec.selectedEvents || [],
+        selectedEventNames: localRec.selectedEventNames || [],
+        leaderName: localRec.leaderName,
+        leaderEmail: localRec.leaderEmail
       };
     }
   }
 
-  // Fallback to local JSON
-  const localRec = getRegistrationFromLocalJSON(codeClean);
-  if (localRec) {
-    console.log(`[Local JSON Match] Code '${codeClean}' matched Team '${localRec.teamName}'`);
-    return {
-      id: localRec.id,
-      teamName: localRec.teamName,
-      selectedEvents: localRec.selectedEvents || [],
-      selectedEventNames: localRec.selectedEventNames || [],
-      leaderName: localRec.leaderName,
-      leaderEmail: localRec.leaderEmail
-    };
+  if (result) {
+    regCache.set(upperCode, { data: result, timestamp: Date.now() });
   }
 
-  console.warn(`[Verification Miss] No registration found for code '${codeClean}'`);
-  return null;
+  return result;
+}
+
+// Pre-Cache Guild Roles on Bot Startup
+async function ensureGuildRolesCached(guild) {
+  try {
+    const fetchedRoles = await guild.roles.fetch();
+    fetchedRoles.forEach(role => {
+      roleCache.set(role.name.trim().toLowerCase(), role);
+    });
+
+    const mainRoleName = (process.env.PARTICIPANT_ROLE_NAME || 'Participant').trim().toLowerCase();
+    if (!roleCache.has(mainRoleName)) {
+      try {
+        const newRole = await guild.roles.create({
+          name: process.env.PARTICIPANT_ROLE_NAME || 'Participant',
+          color: 0x00F0FF,
+          reason: 'GENESIZ Automatic Verification Role'
+        });
+        roleCache.set(mainRoleName, newRole);
+      } catch (e) {
+        console.error('Failed to create participant role:', e.message);
+      }
+    }
+
+    for (const eventRoleName of ALL_EVENT_ROLES) {
+      if (!roleCache.has(eventRoleName.toLowerCase())) {
+        try {
+          const newRole = await guild.roles.create({
+            name: eventRoleName,
+            color: 0x9900FF,
+            reason: `GENESIZ Event Role for ${eventRoleName}`
+          });
+          roleCache.set(eventRoleName.toLowerCase(), newRole);
+        } catch (e) {
+          console.error(`Failed to create event role ${eventRoleName}:`, e.message);
+        }
+      }
+    }
+    console.log(`✅ Cached ${roleCache.size} guild roles for instant verification`);
+  } catch (err) {
+    console.error('Failed to pre-cache guild roles:', err.message);
+  }
 }
 
 // Helper: Calculate Target Roles from Registration
@@ -157,86 +220,74 @@ function getTargetRoleNames(registration) {
 // In-Memory Mapping for Dynamic Background Syncing: User ID -> Operative Code
 const userCodeMap = new Map();
 
-// Sync Roles for a Specific Member based on their Registration Record
+// Optimized Bulk Role Syncing (1-2 API calls max per user instead of 10+)
 async function syncMemberRoles(guild, member, registration) {
   const targetRoleNames = getTargetRoleNames(registration);
+  const mainRoleName = (process.env.PARTICIPANT_ROLE_NAME || 'Participant').trim().toLowerCase();
 
-  // 1. Assign Main Participant Role
-  const mainRoleName = process.env.PARTICIPANT_ROLE_NAME || 'Participant';
-  let participantRole = guild.roles.cache.find(r => r.name.trim().toLowerCase() === mainRoleName.trim().toLowerCase());
+  targetRoleNames.add(mainRoleName);
 
-  if (!participantRole) {
-    try {
-      participantRole = await guild.roles.create({
-        name: mainRoleName,
-        color: 0x00F0FF,
-        reason: 'GENESIZ Automatic Verification Role'
-      });
-    } catch (err) {
-      console.error('Failed to create participant role:', err);
-    }
-  }
-
-  if (participantRole && !member.roles.cache.has(participantRole.id)) {
-    await member.roles.add(participantRole).catch(console.error);
-  }
-
+  const rolesToAdd = [];
+  const rolesToRemove = [];
   const addedRoles = [];
   const removedRoles = [];
 
-  // 2. Synchronize Event Roles: ADD required roles & REMOVE unselected roles
   for (const eventRoleName of ALL_EVENT_ROLES) {
-    const shouldHaveRole = targetRoleNames.has(eventRoleName);
-    let roleObj = guild.roles.cache.find(r => r.name.trim().toLowerCase() === eventRoleName.trim().toLowerCase());
+    const roleKey = eventRoleName.toLowerCase();
+    const roleObj = roleCache.get(roleKey) || guild.roles.cache.find(r => r.name.trim().toLowerCase() === roleKey);
+    if (!roleObj) continue;
+
+    const shouldHaveRole = targetRoleNames.has(roleKey);
 
     if (shouldHaveRole) {
-      // Role SHOULD be assigned
-      if (!roleObj) {
-        try {
-          roleObj = await guild.roles.create({
-            name: eventRoleName,
-            color: 0x9900FF,
-            reason: `GENESIZ Event Role for ${eventRoleName}`
-          });
-        } catch (err) {
-          console.error(`Failed to create role ${eventRoleName}:`, err);
-        }
-      }
-
-      if (roleObj && !member.roles.cache.has(roleObj.id)) {
-        await member.roles.add(roleObj).catch(console.error);
+      if (!member.roles.cache.has(roleObj.id)) {
+        rolesToAdd.push(roleObj);
         addedRoles.push(eventRoleName);
       }
     } else {
-      // Role SHOULD NOT be assigned -> REMOVE if user currently has it!
-      if (roleObj && member.roles.cache.has(roleObj.id)) {
-        await member.roles.remove(roleObj).catch(console.error);
+      if (member.roles.cache.has(roleObj.id)) {
+        rolesToRemove.push(roleObj);
         removedRoles.push(eventRoleName);
       }
     }
   }
 
-  // 3. Set/Update Nickname
+  // Ensure Participant main role is assigned
+  const participantRoleObj = roleCache.get(mainRoleName) || guild.roles.cache.find(r => r.name.trim().toLowerCase() === mainRoleName);
+  if (participantRoleObj && !member.roles.cache.has(participantRoleObj.id) && !rolesToAdd.includes(participantRoleObj)) {
+    rolesToAdd.push(participantRoleObj);
+  }
+
+  // BATCH ROLE ADDITIONS (Single Discord REST call)
+  if (rolesToAdd.length > 0) {
+    await member.roles.add(rolesToAdd).catch(err => console.error(`Error adding roles for ${member.user.tag}:`, err.message));
+  }
+
+  // BATCH ROLE REMOVALS (Single Discord REST call)
+  if (rolesToRemove.length > 0) {
+    await member.roles.remove(rolesToRemove).catch(err => console.error(`Error removing roles for ${member.user.tag}:`, err.message));
+  }
+
+  // Set/Update Nickname asynchronously without blocking role response
   const teamName = registration.teamName;
   const currentUsername = member.user.username;
   let newNickname = `[${teamName}] ${currentUsername}`;
   if (newNickname.length > 32) newNickname = newNickname.substring(0, 31);
 
   if (member.id !== guild.ownerId && member.nickname !== newNickname) {
-    await member.setNickname(newNickname).catch(err => {
-      console.warn(`Could not update nickname for ${member.user.tag}:`, err.message);
-    });
+    member.setNickname(newNickname).catch(() => {});
   }
 
   return { targetRoleNames: Array.from(targetRoleNames), addedRoles, removedRoles };
 }
 
-// Interactive Verification Handler
+// High-Concurrency Interactive Verification Handler
 async function handleVerification(interaction, rawCode) {
   const codeClean = rawCode.trim().toUpperCase();
 
+  // Instant deferral within 100ms to guarantee Discord interaction never times out
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
   }
 
   const registration = await findRegistration(codeClean);
@@ -255,18 +306,16 @@ async function handleVerification(interaction, rawCode) {
       )
       .setFooter({ text: 'GENESIZ 2026 Verification System' });
 
-    return interaction.editReply({ embeds: [errorEmbed] });
+    return interaction.editReply({ embeds: [errorEmbed] }).catch(() => {});
   }
 
   const guild = interaction.guild;
   const member = interaction.member;
 
-  await guild.roles.fetch().catch(console.error);
-
   // Store user-code association for background auto-syncing
   userCodeMap.set(member.id, codeClean);
 
-  // Execute Role Sync (Adds new roles, removes revoked/unselected roles)
+  // Execute Batch Role Sync
   const { targetRoleNames, addedRoles, removedRoles } = await syncMemberRoles(guild, member, registration);
 
   const mainRoleName = process.env.PARTICIPANT_ROLE_NAME || 'Participant';
@@ -285,7 +334,7 @@ async function handleVerification(interaction, rawCode) {
         inline: false 
       }
     )
-    .setFooter({ text: 'GENESIZ 2026 • Live Auto-Sync Active' })
+    .setFooter({ text: 'GENESIZ 2026 • High-Capacity Verification Active' })
     .setTimestamp();
 
   if (addedRoles.length > 0) {
@@ -296,10 +345,10 @@ async function handleVerification(interaction, rawCode) {
     successEmbed.addFields({ name: '➖ Roles Removed', value: removedRoles.map(r => `\`-@${r}\``).join(', '), inline: true });
   }
 
-  return interaction.editReply({ embeds: [successEmbed] });
+  return interaction.editReply({ embeds: [successEmbed] }).catch(() => {});
 }
 
-// Background Task: Periodic Auto-Sync All Users Every 2 Minutes
+// Optimized Background Task: Periodic Auto-Sync Every 10 Minutes with Concurrency Rate Limits
 async function runBackgroundAutoSync() {
   if (!supabase) return;
 
@@ -310,10 +359,10 @@ async function runBackgroundAutoSync() {
     const guild = client.guilds.cache.get(guildId);
     if (!guild) return;
 
-    await guild.roles.fetch().catch(() => {});
+    await ensureGuildRolesCached(guild);
 
-    // For every mapped user in memory, re-fetch their latest registration from Supabase and sync roles
-    for (const [userId, code] of userCodeMap.entries()) {
+    const entries = Array.from(userCodeMap.entries());
+    for (const [userId, code] of entries) {
       try {
         const member = await guild.members.fetch(userId).catch(() => null);
         if (!member) continue;
@@ -322,22 +371,32 @@ async function runBackgroundAutoSync() {
         if (registration) {
           await syncMemberRoles(guild, member, registration);
         }
-      } catch (err) {
-        // Ignore individual sync errors
+        // Small delay to prevent API bursts
+        await new Promise(r => setTimeout(r, 250));
+      } catch {
+        // Ignore individual sync failures
       }
     }
   } catch (err) {
-    console.error('Background sync error:', err);
+    console.error('Background sync error:', err.message);
   }
 }
 
 // Event: Ready
-client.once(Events.ClientReady, c => {
+client.once(Events.ClientReady, async c => {
   console.log(`🤖 GENESIZ Verification Bot active as ${c.user.tag}`);
-  console.log('🔄 Persistent Background Role Synchronization initialized (15-sec interval)');
+  console.log('⚡ High-Concurrency & Bulk Role Sync Engine Initialized!');
 
-  // Run background auto-sync every 15 seconds for near-instant role updates
-  setInterval(runBackgroundAutoSync, 15 * 1000);
+  const guildId = process.env.GUILD_ID;
+  if (guildId) {
+    const guild = client.guilds.cache.get(guildId);
+    if (guild) {
+      await ensureGuildRolesCached(guild);
+    }
+  }
+
+  // Run background auto-sync safely every 10 minutes
+  setInterval(runBackgroundAutoSync, 10 * 60 * 1000);
 });
 
 // Event: Interaction Create
@@ -404,7 +463,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
   } catch (err) {
-    console.error('Interaction handling error:', err);
+    console.error('Interaction handling error:', err.message);
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content: '⚠️ An error occurred during verification. Please try again.' }).catch(() => {});
     } else {
