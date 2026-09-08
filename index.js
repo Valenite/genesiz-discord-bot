@@ -67,7 +67,7 @@ const ALL_EVENT_ROLES = [
   'cryptic hunt'
 ];
 
-// Initialize Discord Client with minimal required intents
+// Initialize Discord Client with required intents
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -168,39 +168,49 @@ async function findRegistration(rawCode) {
 async function ensureGuildRolesCached(guild) {
   try {
     const fetchedRoles = await guild.roles.fetch();
+    roleCache.clear();
     fetchedRoles.forEach(role => {
       roleCache.set(role.name.trim().toLowerCase(), role);
     });
 
     const mainRoleName = (process.env.PARTICIPANT_ROLE_NAME || 'Participant').trim().toLowerCase();
-    if (!roleCache.has(mainRoleName)) {
+    let participantRoleObj = roleCache.get(mainRoleName) || fetchedRoles.find(r => r.name.toLowerCase().includes('participant'));
+    
+    if (!participantRoleObj) {
       try {
-        const newRole = await guild.roles.create({
+        participantRoleObj = await guild.roles.create({
           name: process.env.PARTICIPANT_ROLE_NAME || 'Participant',
           color: 0x00F0FF,
           reason: 'GENESIZ Automatic Verification Role'
         });
-        roleCache.set(mainRoleName, newRole);
+        roleCache.set(mainRoleName, participantRoleObj);
       } catch (e) {
         console.error('Failed to create participant role:', e.message);
       }
+    } else {
+      roleCache.set(mainRoleName, participantRoleObj);
     }
 
     for (const eventRoleName of ALL_EVENT_ROLES) {
-      if (!roleCache.has(eventRoleName.toLowerCase())) {
+      const key = eventRoleName.toLowerCase();
+      let roleObj = roleCache.get(key) || fetchedRoles.find(r => r.name.toLowerCase().includes(key));
+      
+      if (!roleObj) {
         try {
-          const newRole = await guild.roles.create({
+          roleObj = await guild.roles.create({
             name: eventRoleName,
             color: 0x9900FF,
             reason: `GENESIZ Event Role for ${eventRoleName}`
           });
-          roleCache.set(eventRoleName.toLowerCase(), newRole);
+          roleCache.set(key, roleObj);
         } catch (e) {
           console.error(`Failed to create event role ${eventRoleName}:`, e.message);
         }
+      } else {
+        roleCache.set(key, roleObj);
       }
     }
-    console.log(`✅ Cached ${roleCache.size} guild roles for instant verification`);
+    console.log(`✅ Cached ${roleCache.size} guild roles for rapid role sync`);
   } catch (err) {
     console.error('Failed to pre-cache guild roles:', err.message);
   }
@@ -213,12 +223,15 @@ function getTargetRoleNames(registration) {
   const selectedEventNames = registration.selectedEventNames || [];
 
   selectedEvents.forEach(id => {
-    const mapped = EVENT_ROLE_MAP[id.toLowerCase()];
+    if (!id) return;
+    const cleanId = id.toString().toLowerCase().trim();
+    const mapped = EVENT_ROLE_MAP[cleanId];
     if (mapped) targetRoleNames.add(mapped);
   });
 
   selectedEventNames.forEach(name => {
-    const nameLower = name.toLowerCase();
+    if (!name) return;
+    const nameLower = name.toString().toLowerCase().trim();
     for (const [key, mapped] of Object.entries(EVENT_ROLE_MAP)) {
       if (nameLower.includes(key)) {
         targetRoleNames.add(mapped);
@@ -232,7 +245,7 @@ function getTargetRoleNames(registration) {
 // In-Memory Mapping for Dynamic Background Syncing: User ID -> Operative Code
 const userCodeMap = new Map();
 
-// Optimized Bulk Role Syncing (1-2 API calls max per user instead of 10+)
+// Optimized & Robust Role Addition & Removal System
 async function syncMemberRoles(guild, member, registration) {
   const targetRoleNames = getTargetRoleNames(registration);
   const mainRoleName = (process.env.PARTICIPANT_ROLE_NAME || 'Participant').trim().toLowerCase();
@@ -244,50 +257,67 @@ async function syncMemberRoles(guild, member, registration) {
   const addedRoles = [];
   const removedRoles = [];
 
+  const memberRolesCache = member.roles.cache;
+
   for (const eventRoleName of ALL_EVENT_ROLES) {
     const roleKey = eventRoleName.toLowerCase();
-    const roleObj = roleCache.get(roleKey) || guild.roles.cache.find(r => r.name.trim().toLowerCase() === roleKey);
+    const roleObj = roleCache.get(roleKey) || guild.roles.cache.find(r => r.name.trim().toLowerCase().includes(roleKey));
     if (!roleObj) continue;
 
     const shouldHaveRole = targetRoleNames.has(roleKey);
 
     if (shouldHaveRole) {
-      if (!member.roles.cache.has(roleObj.id)) {
+      if (!memberRolesCache.has(roleObj.id)) {
         rolesToAdd.push(roleObj);
-        addedRoles.push(eventRoleName);
+        addedRoles.push(roleObj.name);
       }
     } else {
-      if (member.roles.cache.has(roleObj.id)) {
+      if (memberRolesCache.has(roleObj.id)) {
         rolesToRemove.push(roleObj);
-        removedRoles.push(eventRoleName);
+        removedRoles.push(roleObj.name);
       }
     }
   }
 
-  // Ensure Participant main role is assigned
-  const participantRoleObj = roleCache.get(mainRoleName) || guild.roles.cache.find(r => r.name.trim().toLowerCase() === mainRoleName);
-  if (participantRoleObj && !member.roles.cache.has(participantRoleObj.id) && !rolesToAdd.includes(participantRoleObj)) {
+  // Ensure Participant main role is included in additions if missing
+  const participantRoleObj = roleCache.get(mainRoleName) || guild.roles.cache.find(r => r.name.trim().toLowerCase().includes('participant'));
+  if (participantRoleObj && !memberRolesCache.has(participantRoleObj.id) && !rolesToAdd.some(r => r.id === participantRoleObj.id)) {
     rolesToAdd.push(participantRoleObj);
+    if (!addedRoles.includes(participantRoleObj.name)) {
+      addedRoles.push(participantRoleObj.name);
+    }
   }
 
-  // BATCH ROLE ADDITIONS (Single Discord REST call)
+  // BATCH ROLE ADDITIONS (Single Discord API call)
   if (rolesToAdd.length > 0) {
-    await member.roles.add(rolesToAdd).catch(err => console.error(`Error adding roles for ${member.user.tag}:`, err.message));
+    try {
+      await member.roles.add(rolesToAdd);
+    } catch (err) {
+      console.error(`Batch role addition error for ${member.user.tag}:`, err.message);
+    }
   }
 
-  // BATCH ROLE REMOVALS (Single Discord REST call)
+  // BATCH ROLE REMOVALS (Single Discord API call)
   if (rolesToRemove.length > 0) {
-    await member.roles.remove(rolesToRemove).catch(err => console.error(`Error removing roles for ${member.user.tag}:`, err.message));
+    try {
+      await member.roles.remove(rolesToRemove);
+    } catch (err) {
+      console.error(`Batch role removal error for ${member.user.tag}:`, err.message);
+    }
   }
 
-  // Set/Update Nickname asynchronously without blocking role response
+  // Set/Update Nickname safely without throwing errors
   const teamName = registration.teamName;
   const currentUsername = member.user.username;
   let newNickname = `[${teamName}] ${currentUsername}`;
   if (newNickname.length > 32) newNickname = newNickname.substring(0, 31);
 
   if (member.id !== guild.ownerId && member.nickname !== newNickname) {
-    member.setNickname(newNickname).catch(() => {});
+    try {
+      await member.setNickname(newNickname);
+    } catch {
+      // Ignore nickname permission errors (e.g. server owner or higher role hierarchy)
+    }
   }
 
   return { targetRoleNames: Array.from(targetRoleNames), addedRoles, removedRoles };
@@ -346,7 +376,7 @@ async function handleVerification(interaction, rawCode) {
         inline: false 
       }
     )
-    .setFooter({ text: 'GENESIZ 2026 • High-Capacity Verification Active' })
+    .setFooter({ text: 'GENESIZ 2026 • Role Sync Complete' })
     .setTimestamp();
 
   if (addedRoles.length > 0) {
